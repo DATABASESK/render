@@ -3,6 +3,7 @@ import datetime
 import requests
 import json
 import threading
+import time
 from google import genai
 import tweepy
 from flask import Flask, jsonify, request
@@ -291,7 +292,7 @@ def post_gemini_article_to_linkedin():
 def post_tweet_from_file():
     """
     Fetches text from caption_x.txt and image from image.png (GitHub), 
-    then uploads both to X (Twitter).
+    then uploads both to X (Twitter) with improved error handling.
     """
     print("\n--- Starting X (Twitter) Post from File (with Image) ---")
 
@@ -299,14 +300,14 @@ def post_tweet_from_file():
     TWEET_TEXT = fetch_caption(X_CAPTION_URL)
     if not TWEET_TEXT:
         print("🛑 X caption fetch failed. Aborting X post.")
-        return
+        return False
 
     print(f"✅ Tweet text fetched: {TWEET_TEXT[:50]}...")
 
     # 2. Download Image
     print(f"     Fetching image from: {IMAGE_URL}")
     try:
-        image_response = requests.get(IMAGE_URL)
+        image_response = requests.get(IMAGE_URL, timeout=30)
         image_response.raise_for_status()
         image_bytes = image_response.content
         print("✅ Image downloaded successfully.")
@@ -317,7 +318,7 @@ def post_tweet_from_file():
     # 3. Authenticate and Post
     if not all([CONSUMER_KEY, CONSUMER_SECRET, X_ACCESS_TOKEN, X_ACCESS_SECRET]):
         print("🛑 X API credentials missing. Aborting X post.")
-        return
+        return False
 
     try:
         # Use v2 Client for posting the tweet
@@ -325,7 +326,8 @@ def post_tweet_from_file():
             consumer_key=CONSUMER_KEY,
             consumer_secret=CONSUMER_SECRET,
             access_token=X_ACCESS_TOKEN,
-            access_token_secret=X_ACCESS_SECRET
+            access_token_secret=X_ACCESS_SECRET,
+            wait_on_rate_limit=False
         )
         
         # Use v1.1 API for media upload
@@ -335,7 +337,8 @@ def post_tweet_from_file():
                 CONSUMER_SECRET,
                 X_ACCESS_TOKEN,
                 X_ACCESS_SECRET
-            )
+            ),
+            wait_on_rate_limit=False
         )
 
         user_handle = client.get_me().data['username']
@@ -351,12 +354,21 @@ def post_tweet_from_file():
                 )
                 media_ids.append(media_upload.media_id_string)
                 print(f"✅ Image uploaded with media ID: {media_upload.media_id_string}")
+            except tweepy.TweepyException as upload_error:
+                if '429' in str(upload_error):
+                    print(f"❌ Rate limit on image upload. Trying text-only post...")
+                    media_ids = []
+                else:
+                    print(f"❌ Error uploading image: {upload_error}")
+                    print("Proceeding with text-only tweet.")
+                    media_ids = []
             except Exception as e:
-                print(f"❌ Error uploading image: {e}")
+                print(f"❌ Unexpected error uploading image: {e}")
                 print("Proceeding with text-only tweet.")
                 media_ids = []
 
         # Post the tweet with attached media
+        print("📤 Posting tweet to X...")
         response = client.create_tweet(
             text=TWEET_TEXT,
             media_ids=media_ids if media_ids else None
@@ -366,13 +378,33 @@ def post_tweet_from_file():
         tweet_url = f"https://x.com/{user_handle}/status/{tweet_id}"
         print(f"🎉 Successfully posted tweet to X account @{user_handle}!")
         print(f"Link: {tweet_url}")
+        return True
 
     except tweepy.TweepyException as e:
-        print(f"❌ An error occurred during X API interaction (Tweepy Exception): {e}")
-        if '403 Forbidden' in str(e):
-            print(">>> CRITICAL FIX: Your X Developer App Permissions must be set to 'Read and Write'. Please update in Developer Portal.")
+        error_str = str(e)
+        if '429' in error_str or 'Too Many Requests' in error_str:
+            print(f"❌ X Rate Limit Error (429): You've posted too many times recently.")
+            print(">>> X Rate Limits:")
+            print("    - Free/Basic: 50 tweets per 24 hours")
+            print("    - 300 tweets per 3 hours (user context)")
+            print(">>> Wait 15-60 minutes before retrying.")
+            print(">>> TIP: Run X posting separately or schedule posts with more time between them.")
+            return False
+        elif '403' in error_str or 'Forbidden' in error_str:
+            print(f"❌ X Permission Error (403): {e}")
+            print(">>> Your X Developer App must have 'Read and Write' permissions.")
+            print(">>> Check: https://developer.x.com/en/portal/projects-and-apps")
+            return False
+        elif '401' in error_str or 'Unauthorized' in error_str:
+            print(f"❌ X Authentication Error (401): Invalid credentials.")
+            print(">>> Verify your API keys and tokens are correct.")
+            return False
+        else:
+            print(f"❌ X API Error: {e}")
+            return False
     except Exception as e:
-        print(f"❌ A general error occurred during X posting: {e}")
+        print(f"❌ Unexpected error during X posting: {e}")
+        return False
 
 # ==============================================================================
 # 6. INSTAGRAM POSTING FUNCTION
@@ -418,17 +450,34 @@ def post_to_instagram():
 
         print(f"✅ Step 1: Media container created (with Alt Text and User Tags). ID: {media_container_id}")
 
-        # Step 2: Publish the Media
+        # CRITICAL: Wait for Instagram to process the media
+        print("⏳ Waiting 15 seconds for Instagram to process the media container...")
+        time.sleep(15)
+
+        # Step 2: Publish the Media with retry logic
         publish_url = f"https://graph.facebook.com/v17.0/{INSTAGRAM_BUSINESS_ID}/media_publish"
         publish_params = {
             "creation_id": media_container_id,
             "access_token": ACCESS_TOKEN_IG
         }
 
-        print("     Attempting to publish post...")
-        res = requests.post(publish_url, data=publish_params)
-        res.raise_for_status()
-        print("🎉 Step 2: Instagram Post published successfully (with Alt Text and Tags)!")
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            print(f"     Attempting to publish post (Attempt {attempt}/{max_retries})...")
+            res = requests.post(publish_url, data=publish_params)
+            
+            if res.status_code == 200:
+                print("🎉 Step 2: Instagram Post published successfully (with Alt Text and Tags)!")
+                return
+            elif res.status_code == 400 and "not ready" in res.text.lower():
+                if attempt < max_retries:
+                    wait_time = 10 * attempt
+                    print(f"⏳ Media still processing. Waiting {wait_time} more seconds...")
+                    time.sleep(wait_time)
+                else:
+                    res.raise_for_status()
+            else:
+                res.raise_for_status()
 
     except requests.exceptions.RequestException as e:
         print(f"🛑 Instagram Post FAILED. Error: {e}")
@@ -436,6 +485,8 @@ def post_to_instagram():
             print(f"     Response Status: {e.response.status_code}, Details: {e.response.text[:500]}...")
             if 'Invalid user id' in e.response.text:
                 print(">>> CRITICAL FIX: One or more Instagram usernames in INSTAGRAM_USER_TAGS are invalid/private. Remove/correct them.")
+            elif 'not ready' in e.response.text.lower():
+                print(">>> Instagram needs more time to process media. Consider increasing wait time.")
 
 # ==============================================================================
 # 7. MAIN AUTOMATION SEQUENCE (EXECUTED IN BACKGROUND THREAD)
@@ -447,9 +498,25 @@ def run_automation_sequence():
     print(f"🚀 Starting Unified Social Media Automation for: {TODAY_FOLDER}")
     print("=" * 60)
 
-    # --- X (Twitter) Post from File ---
+    # Track success/failure for final report
+    results = {
+        "x": False,
+        "linkedin_image": False,
+        "linkedin_article": False,
+        "instagram": False
+    }
+
+    # --- X (Twitter) Post from File (PRIORITY: Post First) ---
     print("\n📱 X (TWITTER) POST")
-    post_tweet_from_file()
+    try:
+        post_tweet_from_file()
+        results["x"] = True
+    except Exception as e:
+        print(f"❌ X post encountered an error: {e}")
+        print("Continuing with other platforms...")
+
+    # Add small delay between platforms
+    time.sleep(3)
 
     print("\n" + "=" * 60)
 
@@ -457,24 +524,42 @@ def run_automation_sequence():
     print("\n💼 LINKEDIN POSTS")
     
     # Post 1: Image with Caption
-    post_media_update_to_linkedin()
+    try:
+        post_media_update_to_linkedin()
+        results["linkedin_image"] = True
+    except Exception as e:
+        print(f"❌ LinkedIn image post error: {e}")
+
+    time.sleep(3)
 
     print("\n" + "=" * 60)
 
     # Post 2: Gemini-generated Article
-    post_gemini_article_to_linkedin()
+    try:
+        post_gemini_article_to_linkedin()
+        results["linkedin_article"] = True
+    except Exception as e:
+        print(f"❌ LinkedIn article post error: {e}")
+
+    time.sleep(3)
 
     print("\n" + "=" * 60)
 
     # --- Instagram Post ---
     print("\n📸 INSTAGRAM POST")
-    post_to_instagram()
+    try:
+        post_to_instagram()
+        results["instagram"] = True
+    except Exception as e:
+        print(f"❌ Instagram post error: {e}")
 
     print("\n" + "=" * 60)
     print("✅ Full Automation Sequence Complete!")
-    print("   • X (Twitter): 1 post with image (from caption_x.txt)")
-    print("   • LinkedIn: 2 posts (image + AI article)")
-    print("   • Instagram: 1 post with tags & alt text")
+    print("\n📊 FINAL REPORT:")
+    print(f"   • X (Twitter): {'✅ SUCCESS' if results['x'] else '❌ FAILED'}")
+    print(f"   • LinkedIn Image: {'✅ SUCCESS' if results['linkedin_image'] else '❌ FAILED'}")
+    print(f"   • LinkedIn Article: {'✅ SUCCESS' if results['linkedin_article'] else '❌ FAILED'}")
+    print(f"   • Instagram: {'✅ SUCCESS' if results['instagram'] else '❌ FAILED'}")
     print("=" * 60)
 
 # ==============================================================================

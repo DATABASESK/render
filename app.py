@@ -13,7 +13,8 @@ from typing import Optional
 # 1. CONFIGURATION & SECRETS LOADING (Render Environment Variables)
 # ==============================================================================
 
-# This correctly reads the secret from the Render environment.
+# NOTE: These variables are loaded from the Render Dashboard settings.
+# All secret values must be set in your Render project's Environment Variables.
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 ACCESS_TOKEN_LI = os.environ.get("ACCESS_TOKEN_LI")
 PERSON_URN = os.environ.get("PERSON_URN")
@@ -23,7 +24,7 @@ CONSUMER_KEY = os.environ.get("CONSUMER_KEY")
 CONSUMER_SECRET = os.environ.get("CONSUMER_SECRET")
 X_ACCESS_TOKEN = os.environ.get("X_ACCESS_TOKEN")
 X_ACCESS_SECRET = os.environ.get("X_ACCESS_SECRET")
-WEB_TRIGGER_KEY = os.environ.get("WEB_TRIGGER_KEY") # Your custom security key
+WEB_TRIGGER_KEY = os.environ.get("WEB_TRIGGER_KEY") # Your custom security key: 'growwithkishore2148'
 
 # --- GitHub Repo Info ---
 REPO_OWNER = "DATABASESK"
@@ -116,12 +117,13 @@ def generate_gemini_article_text() -> Optional[str]:
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents="Generate today's real-world digital marketing tips and tricks article.",
-            config={"system_instruction": system_instruction,}
+            config={"system_instruction": system_instruction, }
         )
         return response.text.strip()
     except Exception as e:
         print(f"🛑 Gemini API Error: Could not generate content. Error: {e}")
         return None
+
 
 def generate_tweet_content() -> Optional[str]:
     """Uses the Gemini API to generate a tweet."""
@@ -168,11 +170,13 @@ def fetch_caption(caption_url: str) -> Optional[str]:
     """Fetches the caption text from the GitHub raw URL."""
     try:
         response = requests.get(caption_url)
-        response.raise_for_status()
+        # Ensure that if the file is NOT found (404), we handle it gracefully
+        response.raise_for_status() 
         return response.text.strip()
     except requests.exceptions.HTTPError as e:
         print(f"🛑 Error: Could not find content at {caption_url}. (HTTP Status {e.response.status_code})")
-        return None
+        # Returning None here allows the posting function to abort gracefully
+        return None 
     except requests.exceptions.RequestException as e:
         print(f"🛑 Network Error fetching caption from {caption_url}: {e}")
         return None
@@ -211,6 +215,7 @@ def post_media_update_to_linkedin():
         print("✅ Step 2: Image uploaded successfully.")
         # === STEP 3: Post text + image ===
         post_url = "https://api.linkedin.com/v2/ugcPosts"
+        # CLEANED post_body structure to prevent 422 errors
         post_body = {"author": PERSON_URN, "lifecycleState": "PUBLISHED", "specificContent": {"com.linkedin.ugc.ShareContent": {"shareCommentary": {"text": POST_TEXT}, "shareMediaCategory": "IMAGE", "media": [{"status": "READY", "media": asset_urn, "altText": ALT_TEXT}]}, "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"}}}
         res = requests.post(post_url, json=post_body, headers=headers)
         res.raise_for_status()
@@ -338,6 +343,7 @@ def social_automation_trigger():
     print("=" * 60)
 
     # --- EXECUTION ---
+    # The asynchronous worker (gevent) prevents the 500 error during long API calls.
     final_tweet = generate_tweet_content()
     if final_tweet:
         post_tweet(final_tweet)

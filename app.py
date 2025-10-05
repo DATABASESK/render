@@ -13,7 +13,7 @@ from typing import Optional
 # 1. CONFIGURATION & SECRETS LOADING (Render Environment Variables)
 # ==============================================================================
 
-# NOTE: These variables are loaded from the Render Dashboard settings.
+# This correctly reads the secret from the Render environment.
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 ACCESS_TOKEN_LI = os.environ.get("ACCESS_TOKEN_LI")
 PERSON_URN = os.environ.get("PERSON_URN")
@@ -326,6 +326,7 @@ def social_automation_trigger():
     # 1. SECURITY CHECK (CRITICAL)
     provided_key = request.headers.get("X-Trigger-Key")
     
+    # This line checks the key from the client header against the key read from Render's environment.
     if WEB_TRIGGER_KEY and provided_key != WEB_TRIGGER_KEY:
         return jsonify({"status": "error", "message": "Unauthorized access."}), 403
     

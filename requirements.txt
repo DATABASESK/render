@@ -1,0 +1,5 @@
+requests
+google-genai
+tweepy
+Flask
+gunicorn

@@ -4,3 +4,4 @@ tweepy
 Flask
 gunicorn
 gevent
+Pillow
